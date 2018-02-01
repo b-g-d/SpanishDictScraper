@@ -25,7 +25,7 @@ class SpanishDictScraper:
 
         for word in iteratable:
             for conj in conjugation:
-                results[word] = SpanishDictScraper.get_conjugation(word, conj)
+                results[word + conj] = SpanishDictScraper.get_conjugation(word, conj)
                 sleep(.5)
 
         return results
@@ -61,12 +61,16 @@ class SpanishDictScraper:
         results_dict = {'spanish': "", 'english': "<div><b>Conjugation</b>: {0} ({1}) </div><div><b>" + edited_conjugation + "</b></div>"}
 
         if SpanishDictScraper._is_good_result(soup):
-            english_translation = SpanishDictScraper.get_translation_from_conjugation_result(soup)
-            conjugation_list = SpanishDictScraper.get_conjugation_table_elements(soup)[conjugation]
+            try:
+                english_translation = SpanishDictScraper.get_translation_from_conjugation_result(soup)
+                conjugation_list = SpanishDictScraper.get_conjugation_table_elements(soup)[conjugation]
 
-            results_dict['spanish'] = "<div>"+"</div><div>".join([x for x in conjugation_list]) + "</div>"
-            results_dict['english'] = results_dict['english'].format(spanish_verb, english_translation)
-            return results_dict
+                results_dict['spanish'] = "<div>"+"</div><div>".join([x for x in conjugation_list]) + "</div>"
+                results_dict['english'] = results_dict['english'].format(spanish_verb, english_translation)
+                return results_dict
+            except AttributeError:
+                print("verb I'm having trouble with:\t" + spanish_verb + "\nat url:\t" + url)
+                return {'spanish': "", 'english':SpanishDictScraper.BAD_RESULT_STRING}
 
         return {'spanish': "", 'english':SpanishDictScraper.BAD_RESULT_STRING}
 
@@ -76,9 +80,7 @@ class SpanishDictScraper:
         :return: str
         :type conjugation_result_soup: BeautifulSoup
         """
-        return " ".join(
-            [x.contents[0] for x in conjugation_result_soup.find("div", {"class": "el"}).contents if
-             isinstance(x, Tag)])
+        return " ".join([x.contents[0] for x in conjugation_result_soup.find("div", {"class": "el"}).contents if isinstance(x, Tag)])
 
     @staticmethod
     def get_conjugation_table_elements(conjugation_result_soup):
@@ -156,7 +158,7 @@ class SpanishDictScraper:
     @staticmethod
     def get_results_from_neodict_element(neodict_soup, spanish_word):
 
-        results_dict = {'spanish': spanish_word + "<br>", 'english': ""}
+        results_dict = {'spanish': "<div>" + spanish_word + "</div><br>", 'english': ""}
 
         if neodict_soup is not None:
             different_definitions = neodict_soup.find_all('div',{'class': "dictionary-neodict-indent-1"})

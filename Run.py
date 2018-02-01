@@ -3,7 +3,7 @@ import sys
 import pandas as pd
 
 
-MOST_IMPORTANT_TENSES = ["preteritIndicative", "imperative", "presentIndicative"]
+MOST_IMPORTANT_TENSES = ["preteritIndicative", "imperative", "presentIndicative", "futureIndicative"]
 
 
 if __name__ == '__main__':
