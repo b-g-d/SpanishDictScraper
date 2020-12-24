@@ -1,9 +1,11 @@
 import re
+import sys
 from time import sleep
 
 import requests
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
 import numpy as np
+import pandas as pd
 
 
 class SpanishDictScraper:
@@ -16,29 +18,25 @@ class SpanishDictScraper:
                          "presentPerfect", "imperfectSubjunctive", "negativeImperative", "preteritContinuous"}
 
     @staticmethod
-    def get_conjugation_batch(iteratable, conjugation=None):
+    def get_conjugation_batch(list_of_spanish_words):
 
-        if conjugation is None:
-            conjugation = ["presentIndicative"]
+        results = pd.DataFrame(columns=["back", "front"])
 
-        results = {}
-
-        for word in iteratable:
-            for conj in conjugation:
-                results[word + conj] = SpanishDictScraper.get_conjugation(word, conj)
-                sleep(.5)
+        for word in list_of_spanish_words:
+            r = SpanishDictScraper.get_conjugation(word)
+            results = results.append(r, ignore_index=True)
+            sleep(.1)
 
         return results
 
     @staticmethod
-    def get_definition_batch(iteratable):
-        results = {}
+    def get_definition_batch(list_of_spanish_words):
 
-        for word in iteratable:
-            results[word] = SpanishDictScraper.get_definition_with_examples(word)
-            sleep(.1)
+        list_of_dfs = [SpanishDictScraper.get_definitions_with_examples(x) for x in list_of_spanish_words]
 
-        return results
+        final_results = pd.concat(list_of_dfs, ignore_index=True).reset_index(drop=True)
+
+        return final_results
 
     @staticmethod
     def _is_good_result(soup):
@@ -51,28 +49,62 @@ class SpanishDictScraper:
         return " ".join([x.title() for x in re.split("([a-z]*[a-z])([A-Z][a-z]*)", conj) if x != ""])
 
     @staticmethod
-    def get_conjugation(spanish_verb, conjugation="presentIndicative"):
-        assert (conjugation in SpanishDictScraper.CONJUGATION_TYPES)
+    def get_conjugation(verb_es):
+        verb_form_class = "_2v8iz7Ez"
+        prompt = "<div><b>Conjugation</b>: {verb_es} ({verb_en}) </div><div><b>{conjugation}</b></div>"
 
-        url = 'http://www.spanishdict.com/conjugate/' + spanish_verb
+        url = 'http://www.spanishdict.com/conjugate/' + verb_es
         r = requests.get(url)
-        soup = BeautifulSoup(r.content, "html5lib")
-        edited_conjugation = SpanishDictScraper._transform_conjugation_string(conjugation)
-        results_dict = {'spanish': "", 'english': "<div><b>Conjugation</b>: {0} ({1}) </div><div><b>" + edited_conjugation + "</b></div>"}
+        soup = BeautifulSoup(r.content, "lxml")
 
         if SpanishDictScraper._is_good_result(soup):
             try:
-                english_translation = SpanishDictScraper.get_translation_from_conjugation_result(soup)
-                conjugation_list = SpanishDictScraper.get_conjugation_table_elements(soup)[conjugation]
+                verb_en = SpanishDictScraper.get_translation_from_conjugation_result(soup)
+                sections_of_interest = soup.find_all("div", {"class": verb_form_class})
+                verb_cases = [x.text for x in sections_of_interest]
+                tables = [x.find_next("table") for x in sections_of_interest]
 
-                results_dict['spanish'] = "<div>"+"</div><div>".join([x for x in conjugation_list]) + "</div>"
-                results_dict['english'] = results_dict['english'].format(spanish_verb, english_translation)
-                return results_dict
+                dfs = []
+
+                for i, t in enumerate(tables):
+                    t_df = SpanishDictScraper.convert_html_table_to_dataframe(t, True)
+                    t_df.columns = [prompt.format(verb_es=verb_es, verb_en=verb_en, conjugation=verb_cases[i] + " " + x) for x in t_df.columns]
+                    t_df.drop(t_df.columns[0], axis=1, inplace=True)
+                    t_df = t_df.transpose()
+                    t_df["back"] = t_df.apply(SpanishDictScraper._combine_conjugation_cols, axis=1)
+                    t_df["front"] = t_df.index
+                    dfs.append(t_df[["front", "back"]].reset_index(drop=True))
+
+                if len(dfs) > 0:
+                    return pd.concat(dfs, axis=0)
+                else:
+                    print("no conjugations for " + verb_es)
             except AttributeError:
-                print("verb I'm having trouble with:\t" + spanish_verb + "\nat url:\t" + url)
-                return {'spanish': "", 'english':SpanishDictScraper.BAD_RESULT_STRING}
+                print("verb I'm having trouble with:\t" + verb_es + "\nat url:\t" + url)
 
-        return {'spanish': "", 'english':SpanishDictScraper.BAD_RESULT_STRING}
+        else:
+            print("bad soup with:\t" + verb_es + "\nat url:\t" + url)
+
+    @staticmethod
+    def convert_html_table_to_dataframe(t, with_headers=True):
+        the_data = []
+        col_names = None
+        rows = t.find_all("tr")
+
+        for i, r in enumerate(rows):
+            if with_headers == True:
+                if i == 0:
+                    col_names = [d.text for d in r.find_all("td")]
+                else:
+                    the_data.append([d.text for d in r.find_all("td")])
+            else:
+                the_data.append([d.text for d in r.find_all("td")])
+
+        result = pd.DataFrame(the_data)
+
+        if col_names is not None:
+            result.columns = col_names
+        return result
 
     @staticmethod
     def get_translation_from_conjugation_result(conjugation_result_soup):
@@ -80,27 +112,20 @@ class SpanishDictScraper:
         :return: str
         :type conjugation_result_soup: BeautifulSoup
         """
-        return " ".join([x.contents[0] for x in conjugation_result_soup.find("div", {"class": "el"}).contents if isinstance(x, Tag)])
+        div_class_for_translations = "quickdef1-es"
+        definition_element = conjugation_result_soup.find("div", {"id" : div_class_for_translations})
+        return definition_element.text
 
     @staticmethod
-    def get_conjugation_table_elements(conjugation_result_soup):
+    def _combine_conjugation_cols(row):
         """
         :return: str
-        :type conjugation_result_soup: BeautifulSoup
+        :type row: Series
         """
-        all_conjugations = conjugation_result_soup.find_all("div", {"class": "vtable-word-text"})
-
-        result = dict((el, []) for el in SpanishDictScraper.CONJUGATION_TYPES)
-
-        for entry in all_conjugations:
-            k = entry.attrs['data-tense']
-            entry_content = ["".join(x.string for x in entry.contents)] if len(entry.contents)>1 else entry.contents
-            result[k] += entry_content
-
-        return result
+        return "</br>".join([x for x in row])
 
     @staticmethod
-    def get_definition_with_examples(spanish_word: str, seed=None) -> dict:
+    def get_definitions_with_examples(spanish_word: str, seed=None):
         if seed:
             np.random.seed(seed)
 
@@ -112,79 +137,59 @@ class SpanishDictScraper:
             sleep(3)
             r = requests.get(url)
 
-        soup = BeautifulSoup(r.content, "html5lib")
+        soup = BeautifulSoup(r.content, "lxml")
+
+        es_word_span_class = '_3QFIA64h'
+
+        example_box_div_class = '_1IN7ttrU'
+        translation_span_marker_class = 'OxB8M-Y_'
+        es_example_span_class = '_1f2Xuesa'
+        en_example_span_class = '_3WrcYAGx'
 
         if SpanishDictScraper._is_good_result(soup):
+            try:
+                es_word = soup.find("span", {'class': es_word_span_class}).text
 
+                example_spans = [x for x in soup.find_all('div', {'class': example_box_div_class})]
+                en_translations = [x.find('span', {'class': translation_span_marker_class}).find_next_sibling().text
+                                   for x in example_spans]
+                es_sentences = [x.find('span', {'class': es_example_span_class}) for x in example_spans]
+                en_sentences = [x.find('span', {'class': en_example_span_class}) for x in example_spans]
 
-            search_result_neodict_element = soup.find('div', {'class': "dictionary-neodict"})
+                result_dict = {'es_word': [es_word] * len(en_translations),
+                               'en_translation': en_translations,
+                               'es_sentence': [x.text if x is not None else None for x in es_sentences],
+                               'en_sentence': [x.text if x is not None else None for x in en_sentences]}
 
-            if search_result_neodict_element:
-                return SpanishDictScraper.get_results_from_neodict_element(search_result_neodict_element, spanish_word)
+                r = pd.DataFrame(result_dict).dropna(axis=0, how='any')
 
-            search_result_velazquez_element = soup.find('div', {'class': "dictionary-velazquez"})
-            if search_result_velazquez_element:
-                return SpanishDictScraper.get_results_from_velazquez_element(search_result_velazquez_element, spanish_word)
+                r['front'] = r['es_word'] + "</br></br>" + r['es_sentence']
+                r['back'] = r['en_translation'] + "</br></br>" + r['en_sentence']
 
-            else:
-                return {'spanish': spanish_word, 'english': SpanishDictScraper.BAD_RESULT_STRING}
+                return r[['front', 'back']]
+            except AttributeError:
+                print("definition I'm having trouble with:\t" + spanish_word + "\nat url:\t" + url)
         else:
-
-            return {'spanish': spanish_word, 'english': SpanishDictScraper.BAD_RESULT_STRING}
-
-    @staticmethod
-    def get_results_from_velazquez_element(velazquez_soup, spanish_word):
-        """
-        :type velazquez_soup: BeautifulSoup
-        :rtype: dict
-        """
-
-        #< span class ="part_of_speech" > adjective < / span >
-        #< span class ="def" > Applied to showy or tawdry colors.< / span >
-
-        part_of_speech = velazquez_soup.find('span', {'class':"part_of_speech"})
-
-        assert isinstance(part_of_speech, Tag)
-
-        list_of_defs = velazquez_soup.find_all('span', {'class':'def'})
-        english_results = "<div>(" + part_of_speech.string + ")</div>"
-
-        for d in list_of_defs:
-            english_results += "<div>" + d.contents[0] + "</div>"
-
-        return {'spanish': spanish_word, 'english': english_results}
+            print("bad soup with:\t" + spanish_word + "\nat url:\t" + url)
 
 
-    @staticmethod
-    def get_results_from_neodict_element(neodict_soup, spanish_word):
+if __name__ == '__main__':
+    args = sys.argv
 
-        results_dict = {'spanish': "<div>" + spanish_word + "</div><br>", 'english': ""}
+    input_filename = args[1]
 
-        if neodict_soup is not None:
-            different_definitions = neodict_soup.find_all('div',{'class': "dictionary-neodict-indent-1"})
+    df = pd.read_csv(input_filename).fillna("")
+    result_df = pd.DataFrame(columns=["front", "back"])
 
-            for definition in different_definitions:
-                list_of_translations_for_each_definition = definition.find_all('a', {
-                    "class": "dictionary-neodict-translation-translation"})
-                list_of_examples_for_each_definition = definition.find_all('div',{"class": "dictionary-neodict-example"})
+    words_to_define = df[df['definition'] != "n"]['vocab'].tolist()
+    definitions = SpanishDictScraper.get_definition_batch(words_to_define)
 
-                random_one = np.random.randint(0, len(list_of_translations_for_each_definition), 1)[0]
+    words_to_conjugate = df[df['conjugation'] == "y"]['vocab'].tolist()
+    conjugations = SpanishDictScraper.get_conjugation_batch(words_to_conjugate)
 
-                word_second_language = list_of_translations_for_each_definition[random_one].string if len(list_of_translations_for_each_definition[random_one]) > 0 else ""
+    result_df = result_df.append([definitions, conjugations])
 
-                example_sentence_original_language = \
-                    list_of_examples_for_each_definition[random_one].contents[0].contents[0]
-                example_sentence_second_language = \
-                    list_of_examples_for_each_definition[random_one].find('em', {'class': 'exB'}).contents[0]
+    first_part, second_part = input_filename.split('.c')
 
-                contexts_for_translation = definition.find_all('span', {'class': 'context'})
-                context_string = "".join(["".join(x.contents) for x in contexts_for_translation if
-                                          'dictionary-neodict-translation' not in x.parent.get('class')])
-                if context_string is None:
-                    context_string = ""
-
-                results_dict['spanish'] += "<div>" + example_sentence_original_language + "</div><br>"
-
-                results_dict['english'] += "<div>" + word_second_language + " " + context_string + "</div><div>" + example_sentence_second_language + "</div><br>"
-
-            return results_dict
+    result_df.to_csv(first_part + "_READY.csv", index=False, sep=";", header=False)
+    print("Complete")
